@@ -251,6 +251,35 @@ def validate_resolution(resolution: Union[str, Tuple, int], div=-1) -> List:
     return reso_out
 
 
+def crop_layerdiff_head(img: np.ndarray, head_img: np.ndarray, scale, pad_pos):
+    """Map the predicted head mask to a bounded source crop, or return None."""
+    points = cv2.findNonZero((head_img[..., -1] > 15).astype(np.uint8))
+    bbox = cv2.boundingRect(points) if points is not None else (0, 0, 0, 0)
+    x, y, w, h = bbox
+    x = int(x * scale) - pad_pos[0]
+    y = int(y * scale) - pad_pos[1]
+    w, h = int(w * scale), int(h * scale)
+    ih, iw = img.shape[:2]
+    x1, x2 = min(max(x, 0), iw), min(max(x + w, 0), iw)
+    y1, y2 = min(max(y, 0), ih), min(max(y + h, 0), ih)
+
+    # Add context only after clipping, so a mask in the padding stays empty.
+    if 0 < x2 - x1 < iw // 2:
+        px = min(x1, iw - x2, (x2 - x1) // 5)
+        x1, x2 = x1 - px, x2 + px
+    if 0 < y2 - y1 < ih // 2:
+        py = min(y1, ih - y2, (y2 - y1) // 5)
+        y1, y2 = y1 - py, y2 + py
+
+    crop = img[y1:y2, x1:x2]
+    if w <= 0 or h <= 0 or crop.size == 0:
+        print(f'Skipping head pass: no valid head crop '
+              f'(mask bbox={bbox}, source size={iw}x{ih}, '
+              f'scale={scale}, pad_pos={pad_pos}). Keeping body layers.')
+        return None
+    return crop, (x1, y1, x2, y2)
+
+
 def center_square_pad_resize(img: np.ndarray, target_size, pad_value=0, upscale_interpolation=cv2.INTER_LINEAR, downscale_interpolation=cv2.INTER_AREA, return_pad_info=False):
     h, w = img.shape[:2]
     pad_size = (w, h)

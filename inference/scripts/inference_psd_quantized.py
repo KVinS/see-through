@@ -21,7 +21,6 @@ os.environ['OMP_NUM_THREADS'] = f"{default_n_threads}"
 
 import json
 import time
-import cv2
 import numpy as np
 import torch
 from PIL import Image
@@ -30,7 +29,7 @@ from modules.layerdiffuse.diffusers_kdiffusion_sdxl import KDiffusionStableDiffu
 from modules.layerdiffuse.vae import TransparentVAE
 from modules.layerdiffuse.layerdiff3d import UNetFrameConditionModel
 from modules.marigold import MarigoldDepthPipeline
-from utils.cv import center_square_pad_resize, smart_resize, img_alpha_blending
+from utils.cv import center_square_pad_resize, crop_layerdiff_head, smart_resize, img_alpha_blending
 from utils.torch_utils import seed_everything
 from utils.io_utils import json2dict, dict2json
 from utils.inference_utils import further_extr
@@ -134,7 +133,7 @@ def build_marigold_pipeline(args):
 
 
 def run_layerdiff(pipeline, imgp, save_dir, seed, num_inference_steps, resolution):
-    """Run LayerDiff3D body + head passes. Replicates inference_utils.py v3 logic exactly."""
+    """Run LayerDiff3D body + head passes, skipping an invalid head crop."""
     saved = osp.join(save_dir, osp.splitext(osp.basename(imgp))[0])
     os.makedirs(saved, exist_ok=True)
     input_img = np.array(Image.open(imgp).convert('RGBA'))
@@ -164,31 +163,14 @@ def run_layerdiff(pipeline, imgp, save_dir, seed, num_inference_steps, resolutio
 
     # Head crop
     head_tag_list = ['headwear', 'face', 'irides', 'eyebrow', 'eyewhite', 'eyelash', 'eyewear', 'ears', 'earwear', 'nose', 'mouth']
-    hx0, hy0, hw, hh = cv2.boundingRect(cv2.findNonZero((head_img[..., -1] > 15).astype(np.uint8)))
-
-    hx = int(hx0 * scale) - pad_pos[0]
-    hy = int(hy0 * scale) - pad_pos[1]
-    hw = int(hw * scale)
-    hh = int(hh * scale)
-
-    def _crop_head(img, xywh):
-        x, y, w, h = xywh
-        ih, iw = img.shape[:2]
-        x1 = x
-        y1 = y
-        x2 = x + w
-        y2 = y + h
-        if w < iw // 2:
-            px = min(iw - x - w, x, w // 5)
-            x1 = min(max(x - px, 0), iw)
-            x2 = min(max(x + w + px, 0), iw)
-        if h < ih // 2:
-            py = min(ih - y - h, y, h // 5)
-            y2 = min(max(y + h + py, 0), ih)
-            y1 = min(max(y - py, 0), ih)
-        return img[y1: y2, x1: x2], (x1, y1, x2, y2)
-
-    input_head, (hx1, hy1, hx2, hy2) = _crop_head(input_img, [hx, hy, hw, hh])
+    head_crop = crop_layerdiff_head(input_img, head_img, scale, pad_pos)
+    if head_crop is None:
+        # Overwrite head outputs from earlier runs in the same directory.
+        empty = Image.new('RGBA', (resolution, resolution), (0, 0, 0, 0))
+        for tag in head_tag_list + ['src_head']:
+            empty.save(osp.join(saved, f'{tag}.png'))
+        return
+    input_head, (hx1, hy1, hx2, hy2) = head_crop
     hx1 = int(hx1 / scale + pad_pos[0] / scale)
     hy1 = int(hy1 / scale + pad_pos[1] / scale)
     ih, iw = input_head.shape[:2]
