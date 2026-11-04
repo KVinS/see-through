@@ -1,0 +1,102 @@
+--- a/tools/sugoi_settings.py
++++ b/tools/sugoi_settings.py
+@@ -21,6 +21,7 @@
+     'seed': 42,
+     'split_left_right': True,
+     'group_offload': False,
++    'save_deleted': False,
+     'cache_tag_embeds': True,  # upstream inference CLI always uses the default True
+ }
+ # Compatibility for older local add-ons that import this name.
+@@ -34,7 +35,7 @@
+         s = 'processing'
+         for k in ('resolution','depth_resolution','steps','seed'):
+             if cfg.has_option(s,k): result[k] = cfg.getint(s,k)
+-        for k in ('split_left_right', 'group_offload'):
++        for k in ('split_left_right', 'group_offload', 'save_deleted'):
+             if cfg.has_option(s,k): result[k] = cfg.getboolean(s,k)
+     validate(result)
+     return result
+@@ -56,8 +57,8 @@
+     cfg=configparser.ConfigParser(inline_comment_prefixes=('#',';'))
+     cfg.read(CONFIG, encoding='utf-8-sig')
+     if not cfg.has_section('processing'): cfg.add_section('processing')
+-    for k in ('resolution','depth_resolution','steps','seed','split_left_right','group_offload'):
+-        v=s[k]; cfg.set('processing',k,str(v).lower() if isinstance(v,bool) else str(v))
++    for k in ('resolution','depth_resolution','steps','seed','split_left_right','group_offload','save_deleted'):
++        v=s.get(k, DEFAULTS[k]); cfg.set('processing',k,str(v).lower() if isinstance(v,bool) else str(v))
+     # preserve other sections (queue) and keys; don't pretend cache_tag_embeds is CLI-configurable
+     with CONFIG.open('w',encoding='utf-8') as f: cfg.write(f)
+ 
+--- a/tools/sugoi_gui.py
++++ b/tools/sugoi_gui.py
+@@ -36,6 +36,7 @@
+     'seed': 'Одинаковый seed помогает сравнивать результаты при одинаковых настройках. По умолчанию 42.',
+     'split': 'Дополнительно разделять левое и правое: глаза, перчатки и другие парные детали. Это не разделение рук по суставам. По умолчанию включено.',
+     'offload': 'Переносить блоки между CPU и GPU для экономии VRAM. Может заметно замедлить обработку.',
++    'save_deleted': 'Сохранить пропущенные сегментацией пиксели оригинала в скрытом слое Deleted. Нужен PNG с альфа-каналом. PSD сохранится в исходном размере. Первый запуск загрузит дополнительную модель SemanticSAM.',
+     'layers': 'Посмотреть категории слоёв, которые создаёт модель See-through V3.',
+     'run': 'Создать PSD и сохранить отчёт о времени обработки. Настройки сохраняются перед запуском. Ctrl+Enter.',
+     'cancel': 'Остановить текущую обработку и освободить занятые ею ресурсы. Уже созданные файлы сохранятся. Escape.',
+@@ -110,6 +111,7 @@
+         self.seed = tk.StringVar(value='42')
+         self.left_right = tk.BooleanVar(value=DEFAULTS['split_left_right'])
+         self.group_offload = tk.BooleanVar(value=False)
++        self.save_deleted = tk.BooleanVar(value=DEFAULTS['save_deleted'])
+         self.depth_same = tk.BooleanVar(value=False)
+         self.depth_res = tk.IntVar(value=512)
+         self.status = tk.StringVar(value='Готов к работе')
+@@ -288,6 +290,8 @@
+         self.split_check = self.check(card, 'Разделять левое / правое', self.left_right, 'split')
+         self.split_check.pack(anchor='w')
+         self.check(card, 'Экономия VRAM · Group Offload', self.group_offload, 'offload').pack(anchor='w')
++        self.deleted_check = self.check(card, 'Сохранять удалённое', self.save_deleted, 'save_deleted')
++        self.deleted_check.pack(anchor='w')
+ 
+         actions = ttk.Frame(left)
+         actions.grid(row=1, column=0, sticky='ew', pady=(p(12), p(8)))
+@@ -362,6 +366,7 @@
+         self.seed.set(str(settings['seed']))
+         self.left_right.set(settings['split_left_right'])
+         self.group_offload.set(settings['group_offload'])
++        self.save_deleted.set(settings.get('save_deleted', False))
+         self.depth_same.set(settings['depth_resolution'] == -1)
+         self.depth_res.set(512 if settings['depth_resolution'] == -1 else settings['depth_resolution'])
+         self.update_depth()
+@@ -371,6 +376,7 @@
+                              depth_resolution=-1 if self.depth_same.get() else self.depth_res.get(),
+                              steps=self.steps.get(), seed=int(self.seed.get()),
+                              split_left_right=self.left_right.get(), group_offload=self.group_offload.get(),
++                             save_deleted=self.save_deleted.get(),
+                              cache_tag_embeds=True))
+ 
+     def show_layers(self):
+--- a/tools/benchmark_cold.py
++++ b/tools/benchmark_cold.py
+@@ -70,6 +70,7 @@
+          '--inference_steps',str(settings['steps']),'--seed',str(settings['seed'])]
+     if settings['split_left_right']: cmd.append('--tblr_split')
+     if settings['group_offload']: cmd.append('--group_offload')
++    if settings.get('save_deleted', False): cmd.append('--save_deleted')
+     # No --cache_tag_embeds flag in official CLI; upstream apply_layerdiff defaults to True.
+     return cmd
+ 
+--- a/tools/run_queue.py
++++ b/tools/run_queue.py
+@@ -40,6 +40,7 @@
+         "seed": getint("processing", "seed"),
+         "split_left_right": getbool("processing", "split_left_right"),
+         "group_offload": getbool("processing", "group_offload"),
++        "save_deleted": cfg.getboolean("processing", "save_deleted", fallback=False),
+         "pause_minutes": cfg.getfloat("queue", "pause_minutes"),
+         "skip_existing": getbool("queue", "skip_existing"),
+         "continue_on_error": getbool("queue", "continue_on_error"),
+@@ -68,6 +69,8 @@
+         cmd.append("--tblr_split")
+     if cfg["group_offload"]:
+         cmd.append("--group_offload")
++    if cfg.get("save_deleted", False):
++        cmd.append("--save_deleted")
+     return cmd
+ 
+ 

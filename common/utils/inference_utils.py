@@ -10,6 +10,7 @@ from utils.cv import center_square_pad_resize, crop_layerdiff_head, img_alpha_bl
 from utils.torch_utils import seed_everything
 from utils.io_utils import json2dict, dict2json, load_parts, save_tmp_img, load_part, save_psd
 from utils.torchcv import cluster_inpaint_part
+from utils.deleted import load_deleted, restore_parts_to_source
 
 from psd_tools import PSDImage
 from safetensors.torch import load_file
@@ -415,7 +416,7 @@ def tag_lr_split(tag: str, tag2pinfo):
         tag2pinfo.update(part_lr_split(tag, part_info))
 
 
-def further_extr(srcd: str, rotate=True, save_to_psd=False, tblr_split=True):
+def further_extr(srcd: str, rotate=True, save_to_psd=False, tblr_split=True, save_deleted=False):
 
 
     saved = osp.join(srcd, 'optimized')
@@ -423,6 +424,11 @@ def further_extr(srcd: str, rotate=True, save_to_psd=False, tblr_split=True):
     os.makedirs(saved, exist_ok=True)
 
     fullpage, infos, part_dict_list = load_parts(srcd, rotate=rotate)
+    deleted = None
+    if save_deleted:
+        if rotate or not save_to_psd:
+            raise ValueError('Deleted requires PSD export with rotate=False')
+        deleted = load_deleted(srcd, fullpage.shape[:2])
 
     # optim_depth(part_dict_list, fullpage)
 
@@ -521,19 +527,27 @@ def further_extr(srcd: str, rotate=True, save_to_psd=False, tblr_split=True):
     frame_size = fullpage.shape[:2]
 
     if save_to_psd:
-        dump_parts_psd(tag2pinfo, frame_size, psd_savep, part_dict_list=part_dict_list)
+        dump_parts_psd(tag2pinfo, frame_size, psd_savep, part_dict_list=part_dict_list, deleted=deleted)
         print(f'psd saved to {psd_savep}')
     else:
         dict2json({'parts': tag2pinfo, 'frame_size': frame_size}, osp.join(saved, 'info.json'))
 
 
-def dump_parts_psd(tag2pinfo, frame_size, psd_savep, part_dict_list=None):
+def dump_parts_psd(tag2pinfo, frame_size, psd_savep, part_dict_list=None, deleted=None):
     if part_dict_list is None:
         part_dict_list = []
         for v in tag2pinfo.values():
             part_dict_list.append(v)
     psd_depth_savep = osp.splitext(psd_savep)[0] + '_depth.psd'
     part_dict_list.sort(key=lambda x: x['depth_median'], reverse=True)
+    if deleted is not None:
+        part_dict_list = restore_parts_to_source(part_dict_list, frame_size, deleted.shape[:2])
+        frame_size = deleted.shape[:2]
+        h, w = frame_size
+        part_dict_list.append({'tag': 'Deleted', 'layer_name': 'Deleted', 'img': deleted,
+                               'depth': np.full((h, w), 255, dtype=np.uint8),
+                               'xyxy': [0, 0, w, h], 'depth_median': 1.0, 'visible': False})
+        tag2pinfo = {part['tag']: part for part in part_dict_list}
     save_psd(psd_savep, part_dict_list, frame_size[0], frame_size[1])
     save_psd(psd_depth_savep, part_dict_list, frame_size[0], frame_size[1], mode='L', img_key='depth')
     for pdict in tag2pinfo.values():

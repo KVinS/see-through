@@ -143,6 +143,43 @@ Output is saved to `workspace/layerdiff_output/` by default. Each result include
 
 > **Note:** This uses our most recent model with 23-layer body part separation (V3).
 
+### Preserve deleted original pixels (Sugoi)
+
+Add `--save_deleted` to `inference_psd.py --save_to_psd` to export a hidden,
+full-canvas `Deleted` layer. It contains the exact RGBA bytes of original pixels
+outside the union of foreground segmentation masks, including soft alpha edges.
+Both PSD canvases and generated parts are mapped back to the original image size
+and coordinates; `Deleted` is never resized or recolored. The depth PSD contains
+a hidden neutral depth counterpart for consistent layer metadata.
+
+LayerDiff V3 generates completed parts directly, without a separate visible-mask
+stage. This option therefore runs the repository's 19-part SemanticSAM on the
+original **before** LayerDiff, using `24yearsold/l2d_sam_iter2/checkpoint-18000.pt`
+(downloaded on first use). That model is released before LayerDiff loads. Its
+19 classes differ from V3's categories; `Deleted` reflects this segmentation's
+coverage, not a comparison with generated colors. The masks' union and residual
+are saved as `segmentation_union.png` and `deleted.png` beside the intermediates.
+Final PSD layer transparency is never used to compute the residual.
+
+An original with an alpha channel is required. Optionally pass
+`--segmentation_masks path/to/masks.json` to use pre-inpainting foreground masks
+instead of running SemanticSAM. This must be a `batch_save_masks` RLE JSON file
+in original image coordinates, with no background mask, for a single input image.
+The option defaults to off; exports without it retain the existing behavior.
+
+The local Sugoi desktop checkbox is **«Сохранять удалённое»**; the config key is
+`[processing] save_deleted = true`. Because the wrapper's `tools/` directory lives
+outside this repository, its feature diff is packaged in
+`sugoi/save_deleted_ui.patch` and included in the same commit. After applying the
+commit to another Sugoi installation, run once from `repo/`:
+
+```powershell
+.\.venv\Scripts\python.exe sugoi/install_save_deleted.py
+```
+
+Restart the desktop UI afterward. The installer checks the complete patch before
+applying it, preserves `config.ini`, and detects an already installed patch.
+
 
 Once you have finished the layer splitting, you can further process the PSD with the scripts in `inference/scripts/heuristic_partseg.py` for depth-based or left-right stratification.
 
