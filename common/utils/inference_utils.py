@@ -6,7 +6,7 @@ from modules.layerdiffuse.diffusers_kdiffusion_sdxl import KDiffusionStableDiffu
 from modules.layerdiffuse.vae import TransparentVAE
 from modules.layerdiffuse.layerdiff3d import UNetFrameConditionModel
 from modules.marigold import MarigoldDepthPipeline
-from utils.cv import center_square_pad_resize, crop_layerdiff_head, img_alpha_blending, smart_resize, validate_resolution
+from utils.cv import bbox_intersection, center_square_pad_resize, crop_layerdiff_head, img_alpha_blending, smart_resize, validate_resolution
 from utils.torch_utils import seed_everything
 from utils.io_utils import json2dict, dict2json, load_parts, save_tmp_img, load_part, save_psd
 from utils.torchcv import cluster_inpaint_part
@@ -26,6 +26,14 @@ VALID_BODY_PARTS_V2 = [
     'tail', 'wings', 'objects'
 ]
 EYE_PARTS_BACK_TO_FRONT = ('eyewhite', 'irides', 'eyelash')
+
+
+def save_padded_source(saved, fullpage, source_size):
+    Image.fromarray(fullpage).save(osp.join(saved, 'src_img.png'))
+    infop = osp.join(saved, 'info.json')
+    info = json2dict(infop) if osp.exists(infop) else {'parts': {}}
+    info['source_size'] = source_size
+    dict2json(info, infop)
 
 
 layerdiff_pipeline: KDiffusionStableDiffusionXLPipeline = None
@@ -83,7 +91,7 @@ def apply_layerdiff(
     input_img = np.array(Image.open(imgp).convert('RGBA'))
     fullpage, pad_size, pad_pos = center_square_pad_resize(input_img, resolution, return_pad_info=True)
     scale = pad_size[0] / resolution
-    Image.fromarray(fullpage).save(osp.join(saved, 'src_img.png'))
+    save_padded_source(saved, fullpage, input_img.shape[:2])
 
     rng = torch.Generator(device=pipeline.unet.device).manual_seed(seed)
 
@@ -418,6 +426,40 @@ def tag_lr_split(tag: str, tag2pinfo):
         tag2pinfo.update(part_lr_split(tag, part_info))
 
 
+def _crop_psd_padding(parts, source, source_size, rotate):
+    source_h, source_w = source_size
+    if source_h == source_w:
+        return parts, source
+
+    h, w = source.shape[:2]
+    if rotate:
+        h, w = w, h
+    side = max(source_size)
+    width = max(1, round(source_w * w / side))
+    height = max(1, round(source_h * h / side))
+    # Project the same integer offsets used when padding the original.
+    left = min(w - width, round(((side - source_w) // 2) * w / side))
+    top = min(h - height, round(((side - source_h) // 2) * h / side))
+    right, bottom = left + width, top + height
+    if rotate:
+        left, top, right, bottom = h - bottom, left, h - top, right
+
+    bounds = (left, top, right, bottom)
+    cropped = []
+    for part in parts:
+        box = bbox_intersection(part['xyxy'], bounds)
+        if box is None:
+            continue
+        x1, y1, x2, y2 = box
+        px, py = part['xyxy'][:2]
+        region = np.s_[y1 - py:y2 - py, x1 - px:x2 - px]
+        img = part['img'][region]
+        if img[..., 3].any():
+            cropped.append(dict(part, img=img, depth=part['depth'][region],
+                                xyxy=[x1 - left, y1 - top, x2 - left, y2 - top]))
+    return cropped, source[top:bottom, left:right]
+
+
 def further_extr(srcd: str, rotate=True, save_to_psd=False, tblr_split=True, save_deleted=False):
 
 
@@ -525,14 +567,14 @@ def further_extr(srcd: str, rotate=True, save_to_psd=False, tblr_split=True, sav
     # if 'hairb' in tag2pinfo:
     #     tag2pinfo['hairb']['depth_median'] = 1.
 
-    frame_size = fullpage.shape[:2]
-
     if save_to_psd:
-        dump_parts_psd(tag2pinfo, frame_size, psd_savep, part_dict_list=part_dict_list,
+        if deleted is None and 'source_size' in infos:
+            part_dict_list, fullpage = _crop_psd_padding(part_dict_list, fullpage, infos['source_size'], rotate)
+        dump_parts_psd(tag2pinfo, fullpage.shape[:2], psd_savep, part_dict_list=part_dict_list,
                        deleted=deleted, source=fullpage)
         print(f'psd saved to {psd_savep}')
     else:
-        dict2json({'parts': tag2pinfo, 'frame_size': frame_size}, osp.join(saved, 'info.json'))
+        dict2json({'parts': tag2pinfo, 'frame_size': fullpage.shape[:2]}, osp.join(saved, 'info.json'))
 
 
 def _order_eye_layers(parts):

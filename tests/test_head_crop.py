@@ -5,6 +5,7 @@ Model outputs are deterministic CPU stubs; cropping, PNG IO and PSD export are r
 
 from contextlib import redirect_stdout
 import io
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -202,26 +203,35 @@ class HeadPipelineTests(unittest.TestCase):
                             self.read_image(output / 'character' / f'{tag}.png'), expected)
 
     def test_no_head_completes_depth_and_psd_export_with_body_and_hair(self):
+        cases = [
+            ((128, 128), (128, 128), {'topwear': (24, 48, 104, 104), 'back hair': (20, 8, 108, 56)}),
+            ((160, 75), (60, 128), {'topwear': (0, 48, 60, 104), 'back hair': (0, 8, 60, 56)}),
+            ((75, 160), (128, 60), {'topwear': (24, 14, 104, 60), 'back hair': (20, 0, 108, 22)}),
+        ]
         for mode in ['standard', 'quantized']:
-            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp, \
-                    redirect_stdout(io.StringIO()):
-                output = Path(tmp)
-                source = output / 'character.png'
-                Image.new('RGBA', (128, 128), (200, 180, 160, 255)).save(source)
-                self.run_layers(mode, StubLayerdiff(head_mask()), source, output)
-                depth = StubMarigold()
-                if mode == 'standard':
-                    with patch.object(inference_utils, 'marigold_pipeline', depth):
-                        inference_utils.apply_marigold(str(source), 'unused', save_dir=str(output),
-                                                      resolution=64, num_inference_steps=1)
-                else:
-                    quantized.run_marigold(depth, str(source), str(output), seed=42, resolution_depth=64)
-                inference_utils.further_extr(str(output / 'character'), rotate=False,
-                                            save_to_psd=True, tblr_split=False)
-                for name in ['character.psd', 'character_depth.psd']:
-                    psd = PSDImage.open(output / name)
-                    self.assertEqual(psd.size, (128, 128))
-                    self.assertEqual({layer.name for layer in psd}, {'topwear', 'back hair'})
+            for shape, psd_size, bounds in cases:
+                with self.subTest(mode=mode, shape=shape), tempfile.TemporaryDirectory() as tmp, \
+                        redirect_stdout(io.StringIO()):
+                    output = Path(tmp)
+                    source = output / 'character.png'
+                    Image.new('RGB', shape[::-1], (200, 180, 160)).save(source)
+                    self.run_layers(mode, StubLayerdiff(head_mask()), source, output)
+                    depth = StubMarigold()
+                    if mode == 'standard':
+                        with patch.object(inference_utils, 'marigold_pipeline', depth):
+                            inference_utils.apply_marigold(str(source), 'unused', save_dir=str(output),
+                                                          resolution=64, num_inference_steps=1)
+                    else:
+                        quantized.run_marigold(depth, str(source), str(output), seed=42, resolution_depth=64)
+                    inference_utils.further_extr(str(output / 'character'), rotate=False,
+                                                save_to_psd=True, tblr_split=False)
+                    for name in ['character.psd', 'character_depth.psd']:
+                        psd = PSDImage.open(output / name)
+                        self.assertEqual(psd.size, psd_size)
+                        self.assertEqual({layer.name: layer.bbox for layer in psd}, bounds)
+                    metadata = json.loads((output / 'character.psd.json').read_text(encoding='utf-8'))
+                    self.assertEqual(tuple(metadata['frame_size']), psd_size[::-1])
+                    self.assertEqual({tag: tuple(part['xyxy']) for tag, part in metadata['parts'].items()}, bounds)
 
 
 if __name__ == '__main__':

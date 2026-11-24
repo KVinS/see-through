@@ -32,7 +32,7 @@ from modules.marigold import MarigoldDepthPipeline
 from utils.cv import center_square_pad_resize, crop_layerdiff_head, smart_resize, img_alpha_blending
 from utils.torch_utils import seed_everything
 from utils.io_utils import json2dict, dict2json
-from utils.inference_utils import further_extr
+from utils.inference_utils import further_extr, save_padded_source
 from utils.cv import validate_resolution
 
 
@@ -139,7 +139,7 @@ def run_layerdiff(pipeline, imgp, save_dir, seed, num_inference_steps, resolutio
     input_img = np.array(Image.open(imgp).convert('RGBA'))
     fullpage, pad_size, pad_pos = center_square_pad_resize(input_img, resolution, return_pad_info=True)
     scale = pad_size[0] / resolution
-    Image.fromarray(fullpage).save(osp.join(saved, 'src_img.png'))
+    save_padded_source(saved, fullpage, input_img.shape[:2])
 
     rng = torch.Generator(device=pipeline.unet.device).manual_seed(seed)
 
