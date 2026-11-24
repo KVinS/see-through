@@ -25,6 +25,7 @@ VALID_BODY_PARTS_V2 = [
     'neck', 'neckwear', 'topwear', 'handwear', 'bottomwear', 'legwear', 'footwear', 
     'tail', 'wings', 'objects'
 ]
+EYE_PARTS_BACK_TO_FRONT = ('eyewhite', 'irides', 'eyelash')
 
 
 layerdiff_pipeline: KDiffusionStableDiffusionXLPipeline = None
@@ -203,7 +204,7 @@ def apply_marigold(srcp, pretrained: str, num_inference_steps=-1, seed=0, save_d
     empty_array = np.zeros((src_h, src_w, 4), dtype=np.uint8)
     blended_alpha = np.zeros((src_h, src_w), dtype=np.float32)
 
-    compose_list = {'eyes': ['eyewhite', 'irides', 'eyelash', 'eyebrow'], 'hair': ['back hair', 'front hair']}
+    compose_list = {'eyes': (*EYE_PARTS_BACK_TO_FRONT, 'eyebrow'), 'hair': ['back hair', 'front hair']}
     for tag in VALID_BODY_PARTS_V2:
         tagp = osp.join(saved, f'{tag}.png')
         if osp.exists(tagp):
@@ -465,8 +466,7 @@ def further_extr(srcd: str, rotate=True, save_to_psd=False, tblr_split=True, sav
     if tblr_split:
         tag_lr_split('handwear', tag2pinfo)
 
-        eyetags_v3 = ['eyewhite', 'irides', 'eyelash', 'eyebrow']
-        for tag in eyetags_v3:
+        for tag in (*EYE_PARTS_BACK_TO_FRONT, 'eyebrow'):
             tag_lr_split(tag, tag2pinfo)
 
         tag_lr_split('ears', tag2pinfo)
@@ -535,6 +535,33 @@ def further_extr(srcd: str, rotate=True, save_to_psd=False, tblr_split=True, sav
         dict2json({'parts': tag2pinfo, 'frame_size': frame_size}, osp.join(saved, 'info.json'))
 
 
+def _order_eye_layers(parts):
+    rank = {tag: i for i, tag in enumerate(EYE_PARTS_BACK_TO_FRONT)}
+    slots = {}
+    face_index = None
+    for i, part in enumerate(parts):
+        if not part.get('visible', True):
+            continue
+        tag = part.get('tag', '')
+        if tag == 'face':
+            face_index = i
+        eye_kind = tag.split('-', 1)[0]
+        if eye_kind in rank:
+            slots[i] = rank[eye_kind]
+
+    # Reuse eye slots in the depth stack. Only eye layers below the face need
+    # to move outside those slots so the face cannot hide them.
+    eyes = [parts[i] for i in sorted(slots, key=slots.get)]
+    for i, eye in zip(slots, eyes):
+        parts[i] = eye
+    if face_index is not None:
+        prefix = parts[:face_index + 1]
+        behind_face = [i for i in slots if i < face_index]
+        if behind_face:
+            kept = [part for i, part in enumerate(prefix) if i not in slots]
+            parts[:face_index + 1] = kept + [prefix[i] for i in behind_face]
+
+
 def dump_parts_psd(tag2pinfo, frame_size, psd_savep, part_dict_list=None, deleted=None, source=None):
     if part_dict_list is None:
         part_dict_list = []
@@ -550,6 +577,7 @@ def dump_parts_psd(tag2pinfo, frame_size, psd_savep, part_dict_list=None, delete
     if source is not None:
         part_dict_list = split_clothing_layers(part_dict_list, source)
     part_dict_list.sort(key=lambda part: float(part.get('stack_depth', part['depth_median'])), reverse=True)
+    _order_eye_layers(part_dict_list)
     if deleted is not None:
         h, w = frame_size
         part_dict_list.append({'tag': 'Deleted', 'layer_name': 'Deleted', 'img': deleted,
