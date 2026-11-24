@@ -10,7 +10,8 @@ from utils.cv import center_square_pad_resize, crop_layerdiff_head, img_alpha_bl
 from utils.torch_utils import seed_everything
 from utils.io_utils import json2dict, dict2json, load_parts, save_tmp_img, load_part, save_psd
 from utils.torchcv import cluster_inpaint_part
-from utils.deleted import load_deleted, restore_parts_to_source
+from utils.deleted import load_deleted, restore_parts_to_source, restore_source_canvas
+from utils.clothing import split_clothing_layers
 
 from psd_tools import PSDImage
 from safetensors.torch import load_file
@@ -527,26 +528,34 @@ def further_extr(srcd: str, rotate=True, save_to_psd=False, tblr_split=True, sav
     frame_size = fullpage.shape[:2]
 
     if save_to_psd:
-        dump_parts_psd(tag2pinfo, frame_size, psd_savep, part_dict_list=part_dict_list, deleted=deleted)
+        dump_parts_psd(tag2pinfo, frame_size, psd_savep, part_dict_list=part_dict_list,
+                       deleted=deleted, source=fullpage)
         print(f'psd saved to {psd_savep}')
     else:
         dict2json({'parts': tag2pinfo, 'frame_size': frame_size}, osp.join(saved, 'info.json'))
 
 
-def dump_parts_psd(tag2pinfo, frame_size, psd_savep, part_dict_list=None, deleted=None):
+def dump_parts_psd(tag2pinfo, frame_size, psd_savep, part_dict_list=None, deleted=None, source=None):
     if part_dict_list is None:
         part_dict_list = []
         for v in tag2pinfo.values():
             part_dict_list.append(v)
     psd_depth_savep = osp.splitext(psd_savep)[0] + '_depth.psd'
-    part_dict_list.sort(key=lambda x: x['depth_median'], reverse=True)
     if deleted is not None:
         part_dict_list = restore_parts_to_source(part_dict_list, frame_size, deleted.shape[:2])
         frame_size = deleted.shape[:2]
+        if source is not None:
+            # Split after resizing so the two alphas do not blend at the cut.
+            source = restore_source_canvas(source, frame_size)
+    if source is not None:
+        part_dict_list = split_clothing_layers(part_dict_list, source)
+    part_dict_list.sort(key=lambda part: float(part.get('stack_depth', part['depth_median'])), reverse=True)
+    if deleted is not None:
         h, w = frame_size
         part_dict_list.append({'tag': 'Deleted', 'layer_name': 'Deleted', 'img': deleted,
                                'depth': np.full((h, w), 255, dtype=np.uint8),
                                'xyxy': [0, 0, w, h], 'depth_median': 1.0, 'visible': False})
+    if source is not None or deleted is not None:
         tag2pinfo = {part['tag']: part for part in part_dict_list}
     save_psd(psd_savep, part_dict_list, frame_size[0], frame_size[1])
     save_psd(psd_depth_savep, part_dict_list, frame_size[0], frame_size[1], mode='L', img_key='depth')

@@ -96,6 +96,14 @@ def load_deleted(saved, frame_size):
     return pixels
 
 
+def restore_source_canvas(canvas, source_size):
+    h, w = source_size
+    side = max(h, w)
+    px, py = (side - w) // 2, (side - h) // 2
+    resized = cv2.resize(canvas, (side, side), interpolation=cv2.INTER_LINEAR)
+    return resized[py:py+h, px:px+w]
+
+
 def restore_parts_to_source(parts, frame_size, source_size):
     """Undo the centered square padding and resize for generated parts only.
 
@@ -103,9 +111,6 @@ def restore_parts_to_source(parts, frame_size, source_size):
     before the inverse transform; some optimized parts extend into its padding.
     """
     ih, iw = frame_size
-    h, w = source_size
-    side = max(h, w)
-    px, py = (side - w) // 2, (side - h) // 2
     restored = []
     for part in parts:
         item = dict(part)
@@ -117,8 +122,7 @@ def restore_parts_to_source(parts, frame_size, source_size):
             canvas = np.full((ih, iw) + array.shape[2:], fill, dtype=array.dtype)
             if left < right and top < bottom:
                 canvas[top:bottom, left:right] = array[top-y1:bottom-y1, left-x1:right-x1]
-            canvas = cv2.resize(canvas, (side, side), interpolation=cv2.INTER_LINEAR)
-            arrays[key] = canvas[py:py+h, px:px+w]
+            arrays[key] = restore_source_canvas(canvas, source_size)
         bx, by, bw, bh = cv2.boundingRect((arrays['img'][..., 3] > 0).astype(np.uint8))
         if bw == 0 or bh == 0:
             bx = by = 0

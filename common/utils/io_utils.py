@@ -508,13 +508,21 @@ def save_psd(savep, img_list, h, w, pad_to_canvas=False, mode='RGBA', img_key='i
             img_padded[y1: y2, x1: x2] = img
             x1 = y1 = 0
             img = img_padded
+        if img_key == 'depth' and np.issubdtype(img.dtype, np.floating):
+            img = np.rint(np.clip(img, 0, 1) * 255).astype(np.uint8)
         img = Image.fromarray(img)
+        if img_key == 'depth' and 'source_tag' in imgd:
+            img.putalpha(Image.fromarray(imgd['img'][..., 3]))
         layer_name = 'undefined'
         if 'layer_name' in imgd:
             layer_name = imgd['layer_name']
         elif 'tag' in imgd:
             layer_name = imgd['tag']
         layer = psd_image.create_pixel_layer(img, name=layer_name, top=y1, left=x1, opacity=255)
+        if img_key == 'img' and mode == 'RGBA' and 'source_tag' in imgd and layer.has_mask():
+            # The RGBA channel already contains the split edge. A second copy
+            # in the layer mask would apply the same alpha twice.
+            layer.remove_mask()
         layer.visible = imgd.get('visible', True)
 
     psd_image.save(savep)
