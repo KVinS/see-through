@@ -1,0 +1,296 @@
+diff --git a/tools/sugoi_gui.py b/tools/sugoi_gui.py
+--- a/tools/sugoi_gui.py
++++ b/tools/sugoi_gui.py
+@@ -41,7 +41,7 @@
+     'run': 'Создать PSD для всех выбранных файлов по очереди. Общие настройки фиксируются перед запуском. Для каждого файла сохраняется отчёт. Ctrl+Enter.',
+     'cancel': 'Остановить текущую обработку и всю оставшуюся очередь. Уже созданные файлы сохранятся. Escape.',
+     'save': 'Настройки загружаются при открытии и сохраняются перед запуском. Ctrl+S — сохранить отдельно.',
+-    'progress': 'Прогресс текущего этапа. После начала генерации видны время шага и оценка оставшегося времени от модели. Прогресс в панели задач учитывает всю очередь.',
++    'progress': 'Общий прогресс по всем этапам и файлам очереди. Время шага и оценка остатка относятся к текущему этапу.',
+ }
+ 
+ 
+@@ -511,8 +511,6 @@
+                 if event['state'] == 'start':
+                     self.reset_file_progress()
+                     self.monitor_label.grid_remove()
+-                    self.progress_value.set(0)
+-                    self.progress_text.set('')
+                     self.phase.set('Подготовка к запуску…')
+                     self.batch_status.set(f'Файл {index} из {total} · {Path(event["image"]).name}')
+                     self.batch_label.grid()
+@@ -522,7 +520,7 @@
+                     else:
+                         self.batch_failed += 1
+                     self.overall.finish()
+-                self.update_taskbar()
++                self.update_progress()
+                 return
+             except (ValueError, TypeError, KeyError):
+                 pass
+@@ -539,46 +537,39 @@
+                     self.active_denoising_stage = stage if state == 'start' and stage in ('body', 'head', 'depth') else None
+                     self.phase_base = names[stage]
+                     self.phase.set(self.phase_base)
+-                    if state == 'start':
+-                        self.progress_value.set(0)
+-                        self.progress_text.set('')
+                     self.overall.update(stage, 0, total, done=state == 'done')
+-                    self.update_taskbar()
++                    self.update_progress()
+                     return
+             except (ValueError, TypeError, KeyError):
+                 pass  # Keep an unexpected message in the journal instead of breaking the UI.
+         if line.startswith(PROGRESS_PREFIX):
+-            if self.cancel_pending:
++            if not self.busy or self.cancel_pending:
+                 return
+             value = line[len(PROGRESS_PREFIX):]
+             count = re.search(r'\b(\d+)/(\d+)\b', value)
+             if count and int(count[2]):
+-                percent = min(100, int(count[1]) / int(count[2]) * 100)
+-                self.progress_value.set(percent)
+-                detail = f'{count[1]} / {count[2]} · {percent:.0f}%'
++                timing = ''
+                 speed = re.search(r'(\d+(?:\.\d+)?)s/it', value)
+                 remaining = re.search(r'<([\d:]+)', value)
+                 if speed:
+-                    detail += f'\n{float(speed[1]):.0f} с/шаг'
++                    timing = f'{float(speed[1]):.0f} с/шаг'
+                     if remaining:
+-                        detail += f' · ≈{remaining[1]}'
+-                self.progress_text.set(detail)
+-                if self.busy:
+-                    current, total = int(count[1]), int(count[2])
+-                    if 'Loading pipeline' in value and self.overall.stage == 'load':
+-                        self.overall.update('load', current, total)
+-                    elif re.match(r'^\s*\d+%\|', value):
+-                        # Older trace runners have no stage events; detect the second
+-                        # denoising pass by the reset of its counter.
+-                        stage = self.active_denoising_stage if self.stage_events else self.overall.stage
+-                        if not self.stage_events and stage == 'load':
+-                            stage = 'body' if self.layer_phase_started and total == self.steps.get() else None
+-                        elif not self.stage_events and stage == 'body' and current < self.last_stage_count:
+-                            stage = 'head'
+-                        if stage in ('body', 'head', 'depth'):
+-                            self.overall.update(stage, current, total)
+-                            self.last_stage_count = current
+-                    self.update_taskbar()
++                        timing += f' · ≈{remaining[1]}'
++                current, total = int(count[1]), int(count[2])
++                if 'Loading pipeline' in value and self.overall.stage == 'load':
++                    self.overall.update('load', current, total)
++                elif re.match(r'^\s*\d+%\|', value):
++                    # Older trace runners have no stage events; detect the second
++                    # denoising pass by the reset of its counter.
++                    stage = self.active_denoising_stage if self.stage_events else self.overall.stage
++                    if not self.stage_events and stage == 'load':
++                        stage = 'body' if self.layer_phase_started and total == self.steps.get() else None
++                    elif not self.stage_events and stage == 'body' and current < self.last_stage_count:
++                        stage = 'head'
++                    if stage in ('body', 'head', 'depth'):
++                        self.overall.update(stage, current, total)
++                        self.last_stage_count = current
++                self.update_progress(timing=timing)
+             if 'Loading weights' in value:
+                 self.phase.set('Загрузка весов')
+             elif 'Loading pipeline' in value:
+@@ -603,19 +594,16 @@
+         for marker, title in [('PHASE START: LayerDiff', 'Слои · тело и голова'),
+                               ('PHASE START: Marigold', 'Глубина · Marigold'),
+                               ('PHASE START: PSD', 'Сборка PSD')]:
+-            if marker in line:
++            if marker in line and self.busy and not self.cancel_pending:
+                 self.phase_base = title
+                 self.phase.set(title)
+-                self.progress_value.set(0)
+-                self.progress_text.set('')
+                 if marker == 'PHASE START: LayerDiff':
+                     self.layer_phase_started = True
+-                if self.busy and marker == 'PHASE START: Marigold':
++                elif marker == 'PHASE START: Marigold':
+                     self.overall.update('depth')
+-                    self.update_taskbar()
+-                elif self.busy and marker == 'PHASE START: PSD':
++                elif marker == 'PHASE START: PSD':
+                     self.overall.update('export')
+-                    self.update_taskbar()
++                self.update_progress()
+         if 'START Loading ' in line:
+             self.phase.set('Загрузка ' + line.split('START Loading ', 1)[1].split(';', 1)[0])
+         bottom = self.output.yview()[1] >= .995
+@@ -642,14 +630,16 @@
+         self.last_stage_count = 0
+         self.phase_base = 'Слои · тело и голова'
+ 
+-    def update_taskbar(self, *, state='normal'):
++    def update_progress(self, *, state='normal', timing=''):
+         percent = self.overall_percent()
+-        if self.cancel_pending:
+-            state = 'paused'
+-        self.taskbar.set(state, round(percent*100))
++        label = f'{int(percent)}%'
++        self.progress_value.set(percent)
++        self.progress_text.set(f'{label}\n{timing}' if timing else label)
++        taskbar_value = round(percent*100)
++        self.taskbar.set(state, max(1, taskbar_value) if state == 'error' else taskbar_value)
+         if self.busy and not self.cancel_pending:
+-            self.status.set(f'Обработка · {int(percent)}%')
+-            self.win.title(f'{int(percent)}% — Sugoi / See-through')
++            self.status.set('Обработка')
++            self.win.title(f'{label} — Sugoi / See-through')
+ 
+     def run(self):
+         if self.busy:
+@@ -696,9 +686,8 @@
+         if self.taskbar_clear_job is not None:
+             self.win.after_cancel(self.taskbar_clear_job)
+             self.taskbar_clear_job = None
+-        self.update_taskbar(state='indeterminate')
++        self.update_progress(state='indeterminate')
+         self.last_elapsed = None
+-        self.status.set('Обработка')
+         self.state_label.configure(foreground=ACCENT)
+         self.phase.set('Подготовка к запуску…')
+         self.monitor_status.set('')
+@@ -708,8 +697,6 @@
+             self.batch_label.grid()
+         else:
+             self.batch_label.grid_remove()
+-        self.progress_value.set(0)
+-        self.progress_text.set('')
+         self.runbtn.state(['disabled'])
+         self.cancelbtn.configure(text='Отменить', state='normal')
+         for widget in self.inputs:
+@@ -827,15 +814,14 @@
+             self.progress_value.set(0)
+         elif code == 0:
+             self.overall.finish()
+-            self.taskbar.set('normal', 10000)
++            self.batch_progress = 100.0
++            self.update_progress()
+             self.taskbar_clear_job = self.win.after(1200, self.clear_taskbar)
+             self.status.set(f'Готово · {self.batch_total} / {self.batch_total}' if self.batch_total > 1 else 'Готово')
+             self.state_label.configure(foreground='#8ed8b5')
+             self.phase.set('PSD сохранены в папку «Результаты»' if self.batch_total > 1 else 'PSD сохранён в папку «Результаты»')
+-            self.progress_value.set(100)
+-            self.progress_text.set('100%')
+         else:
+-            self.taskbar.set('error', max(1, round(self.overall_percent()*100)))
++            self.update_progress(state='error')
+             self.status.set('Обработка завершилась с ошибкой')
+             self.state_label.configure(foreground='#ff9d9d')
+             self.phase.set('Подробности в журнале и отчёте')
+diff --git a/tools/sugoi_progress.py b/tools/sugoi_progress.py
+--- a/tools/sugoi_progress.py
++++ b/tools/sugoi_progress.py
+@@ -1,4 +1,4 @@
+-"""Overall work progress, separate from the progress bar of an individual stage."""
++"""Track the overall progress of a file across pipeline stages."""
+ from __future__ import annotations
+ 
+ STAGES = ('load', 'body', 'head', 'depth', 'export')
+diff --git a/tools/tests/test_sugoi_gui.py b/tools/tests/test_sugoi_gui.py
+--- a/tools/tests/test_sugoi_gui.py
++++ b/tools/tests/test_sugoi_gui.py
+@@ -186,6 +186,8 @@
+             self.assertTrue(widget.winfo_ismapped())
+             self.assertLessEqual(widget.winfo_rooty()+widget.winfo_height(),
+                                  self.window.winfo_rooty()+self.window.winfo_height())
++        with mock.patch.object(self.app, 'busy', True):
++            self.app.append('PHASE START: LayerDiff BODY + HEAD')
+         for i in range(200):
+             self.app.append(f'Log line {i}')
+         self.window.update()
+@@ -193,40 +195,46 @@
+         self.window.update()
+         first = self.app.output.index('@0,0')
+         text = self.app.output.get('1.0', 'end')
+-        self.app.append(PROGRESS_PREFIX+'67%|x| 20/30')
++        with mock.patch.object(self.app, 'busy', True):
++            self.app.append(PROGRESS_PREFIX+'67%|x| 20/30')
+         self.assertEqual(text, self.app.output.get('1.0', 'end'))
+-        self.assertAlmostEqual(self.app.progress_value.get(), 20/30*100)
++        self.assertAlmostEqual(self.app.progress_value.get(), (5+20)/70*100)
+         self.app.append('New log line')
+         self.window.update()
+         self.assertEqual(self.app.output.index('@0,0'), first)
+ 
+-    def test_taskbar_keeps_total_progress_across_stage_resets(self):
++    def test_window_and_taskbar_keep_total_progress_across_stages(self):
+         self.app.busy = True
+         def stage(name, state='start', total=30):
+             self.app.append(STAGE_PREFIX+json.dumps(dict(stage=name, state=state, total=total)))
+         self.app.append(PROGRESS_PREFIX+'Loading pipeline components...: 100%|x| 5/5')
+         stage('body')
+         self.app.append(PROGRESS_PREFIX+'100%|x| 30/30')
++        self.assertEqual(self.app.progress_value.get(), 50)
++        self.assertEqual(self.app.progress_text.get(), '50%')
++        self.app.taskbar.set.assert_called_with('normal', 5000)
+         stage('body', 'done')
+-        before_head = self.app.overall.value
+         stage('head')
++        self.assertEqual(self.app.progress_value.get(), 50)
+         self.app.append(PROGRESS_PREFIX+'0%|x| 0/30')
+-        self.assertEqual(self.app.overall.value, before_head)
++        self.assertEqual(self.app.progress_value.get(), 50)
+         self.app.append(PROGRESS_PREFIX+'100%|x| 30/30')
+         stage('head', 'done')
+-        before_depth = self.app.overall.value
++        before_depth = self.app.progress_value.get()
++        self.app.append('PHASE START: Marigold')
++        self.assertEqual(self.app.progress_value.get(), before_depth)
+         self.app.append(PROGRESS_PREFIX+'Fetching 4 files: 100%|x| 4/4')
+-        self.assertEqual(self.app.overall.value, before_depth)
++        self.assertEqual(self.app.progress_value.get(), before_depth)
+         stage('depth', total=4)
+         self.app.append(PROGRESS_PREFIX+'100%|x| 4/4')
+         stage('depth', 'done', total=4)
+         stage('export', total=1)
+         stage('export', 'done', total=1)
+-        self.assertEqual(self.app.overall.value, 99)
++        self.assertEqual(self.app.progress_value.get(), 99)
+         values = [c.args[1] for c in self.app.taskbar.set.call_args_list if c.args[0] == 'normal']
+         self.assertEqual(values, sorted(values))
+         self.app.finished(0)
+-        self.assertEqual(self.app.overall.value, 100)
++        self.assertEqual(self.app.progress_value.get(), 100)
+         self.app.taskbar.set.assert_called_with('normal', 10000)
+         self.window.after_cancel(self.app.taskbar_clear_job)
+         self.app.clear_taskbar()
+@@ -268,16 +276,18 @@
+         event('start', 1)
+         self.app.append(STAGE_PREFIX+json.dumps(dict(stage='body', state='start', total=30)))
+         self.app.append(PROGRESS_PREFIX+'100%|x| 30/30')
+-        self.assertLess(self.app.overall_percent(), 50)
++        self.assertEqual(self.app.progress_value.get(), 25)
+         event('done', 1, status='ok')
+-        self.assertEqual(self.app.overall_percent(), 50)
++        self.assertEqual(self.app.progress_value.get(), 50)
+         event('start', 2)
+-        self.assertEqual(self.app.overall_percent(), 50)
+-        self.assertEqual(self.app.overall.value, 0)
++        self.assertEqual(self.app.progress_value.get(), 50)
++        self.assertEqual(self.app.progress_text.get(), '50%')
+         self.assertIn('Файл 2 из 2', self.app.batch_status.get())
+         event('done', 2, status='ok')
+-        self.assertEqual(self.app.overall_percent(), 99)
++        self.assertEqual(self.app.progress_value.get(), 99)
+         self.app.finished(0)
++        self.assertEqual(self.app.progress_value.get(), 100)
++        self.assertEqual(self.app.progress_text.get(), '100%')
+         self.assertEqual(self.app.status.get(), 'Готово · 2 / 2')
+         self.assertIn('Создано PSD: 2', self.app.batch_status.get())
+         self.assertFalse(batch_file.exists())
+@@ -294,7 +304,10 @@
+         self.assertEqual(self.app.get_images(), [])
+ 
+     def test_slow_step_shows_model_timing_and_heartbeat_silence(self):
+-        self.app.append(PROGRESS_PREFIX+'3%|x| 1/30 [01:43<50:10, 103.83s/it]')
++        with mock.patch.object(self.app, 'busy', True):
++            self.app.append(STAGE_PREFIX+json.dumps(dict(stage='body', state='start', total=30)))
++            self.app.append(PROGRESS_PREFIX+'3%|x| 1/30 [01:43<50:10, 103.83s/it]')
++        self.assertTrue(self.app.progress_text.get().startswith('8%\n'))
+         self.assertIn('104 с/шаг', self.app.progress_text.get())
+         self.assertIn('≈50:10', self.app.progress_text.get())
+         self.app.append('[SUGOI HEARTBEAT +195s] alive PID=1, no output for 17s | GPU VRAM=15123MB load=100% temp=63C')
