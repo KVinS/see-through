@@ -1,2 +1,3 @@
 # Unified patches contain intentional blank context lines (a single space).
 sugoi/*.patch -whitespace
+sugoi/overall_progress_ui.patch text eol=lf
